@@ -32,11 +32,13 @@ def verify_password(password, encoded):
 
 
 def load_env(path):
+    values = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip() and not line.lstrip().startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip())
+                values[key.strip()] = value.strip()
+    return values
 
 
 @dataclass
@@ -51,15 +53,18 @@ class Settings:
 
     def __post_init__(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        load_env(Path(os.environ.get("BILLING_ENV_FILE", self.data_dir / ".env")))
+        self.env_path = Path(os.environ.get("BILLING_ENV_FILE", self.data_dir / ".env"))
+        self.environment_overrides = frozenset(os.environ)
+        self.values = {**load_env(self.env_path), **os.environ}
+        values = self.values
         self.db_path = (
-            Path(os.environ.get("BILLING_DB_PATH", self.data_dir / "cloth_shop.db"))
+            Path(values.get("BILLING_DB_PATH", self.data_dir / "cloth_shop.db"))
             .expanduser()
             .resolve()
         )
-        self.port = int(os.environ.get("BILLING_PORT", "5000"))
-        self.host = os.environ.get("BILLING_HOST", "0.0.0.0")
-        self.public_url = os.environ.get("BILLING_PUBLIC_URL", "").rstrip("/")
+        self.port = int(values.get("BILLING_PORT", "5000"))
+        self.host = values.get("BILLING_HOST", "0.0.0.0")
+        self.public_url = values.get("BILLING_PUBLIC_URL", "").rstrip("/")
         if self.public_url:
             from urllib.parse import urlsplit
 
@@ -75,10 +80,10 @@ class Settings:
                 raise ValueError(
                     "BILLING_PUBLIC_URL must be an HTTP(S) shop URL without credentials, query or fragment"
                 )
-        self.server_url = os.environ.get("BILLING_SERVER_URL", "").rstrip("/")
-        self.admin_hash = os.environ.get("ADMIN_PASSWORD_HASH", "")
+        self.server_url = values.get("BILLING_SERVER_URL", "").rstrip("/")
+        self.admin_hash = values.get("ADMIN_PASSWORD_HASH", "")
         self.company = {
-            key: os.environ.get(env, default)
+            key: values.get(env, default)
             for key, env, default in [
                 ("name", "COMPANY_NAME", "Your Company"),
                 ("address", "COMPANY_ADDRESS", ""),
@@ -94,28 +99,26 @@ class Settings:
                 ("terms", "INVOICE_TERMS", "Thank you for your business."),
             ]
         }
-        self.tax_mode = os.environ.get("DEFAULT_TAX_MODE", "exclusive")
+        self.tax_mode = values.get("DEFAULT_TAX_MODE", "exclusive")
         if self.tax_mode not in ("inclusive", "exclusive", "none"):
             raise ValueError("DEFAULT_TAX_MODE must be inclusive, exclusive or none")
-        self.default_gst = os.environ.get("DEFAULT_GST_RATE", "5")
-        self.whatsapp_provider = os.environ.get("WHATSAPP_PROVIDER", "disabled")
-        self.whatsapp_token = os.environ.get("WHATSAPP_TOKEN", "")
-        self.whatsapp_phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
-        self.whatsapp_version = os.environ.get("WHATSAPP_API_VERSION", "v23.0")
-        self.whatsapp_base = os.environ.get(
+        self.default_gst = values.get("DEFAULT_GST_RATE", "5")
+        self.whatsapp_provider = values.get("WHATSAPP_PROVIDER", "disabled")
+        self.whatsapp_token = values.get("WHATSAPP_TOKEN", "")
+        self.whatsapp_phone_id = values.get("WHATSAPP_PHONE_NUMBER_ID", "")
+        self.whatsapp_version = values.get("WHATSAPP_API_VERSION", "v23.0")
+        self.whatsapp_base = values.get(
             "WHATSAPP_API_BASE", "https://graph.facebook.com"
         ).rstrip("/")
-        self.whatsapp_bill_template = os.environ.get("WHATSAPP_BILL_TEMPLATE", "")
-        self.whatsapp_language = os.environ.get("WHATSAPP_LANGUAGE", "en")
+        self.whatsapp_bill_template = values.get("WHATSAPP_BILL_TEMPLATE", "")
+        self.whatsapp_language = values.get("WHATSAPP_LANGUAGE", "en")
         self.secure_cookie = (
-            os.environ.get("BILLING_COOKIE_SECURE", "false").lower() == "true"
+            values.get("BILLING_COOKIE_SECURE", "false").lower() == "true"
         )
-        self.backup_keep = max(5, int(os.environ.get("BACKUP_KEEP", "30")))
-        self.backup_seconds = max(
-            5, int(os.environ.get("BACKUP_INTERVAL_SECONDS", "60"))
-        )
+        self.backup_keep = max(5, int(values.get("BACKUP_KEEP", "30")))
+        self.backup_seconds = max(5, int(values.get("BACKUP_INTERVAL_SECONDS", "60")))
         self.backup_dir = (
-            Path(os.environ.get("BACKUP_DIR", self.data_dir / "backups"))
+            Path(values.get("BACKUP_DIR", self.data_dir / "backups"))
             .expanduser()
             .resolve()
         )

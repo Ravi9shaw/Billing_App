@@ -65,3 +65,13 @@ class PaymentBody(BaseModel):
     payment_date: str | None = None
     payment_mode: Literal["Cash", "Card", "UPI", "Other"] = "Cash"
     notes: str = Field(default="", max_length=2000)
+
+
+class ConfigurationBody(BaseModel):
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    values: dict[str, str]
+    whatsapp_token: str = Field(default="", max_length=4000)
+    clear_whatsapp_token: bool = False
+    new_password: str = Field(default="", max_length=1000)
+    current_password: str = Field(default="", max_length=1000)
+    confirm_password: str = Field(default="", max_length=1000)

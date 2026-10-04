@@ -89,9 +89,11 @@ async function api(
         j = await r.json();
       } catch {}
       throw Error(
-        typeof j?.detail === "string"
-          ? j.detail
-          : `Request failed (${r.status}). Check the input and try again.`,
+        r.status === 404 && j?.detail === "Not Found"
+          ? "This backend does not provide the requested screen. Restart the updated host; an older server may still be running."
+          : typeof j?.detail === "string"
+            ? j.detail
+            : `Request failed (${r.status}). Check the input and try again.`,
       );
     }
     $("#connection").textContent = "● Connected";
@@ -198,6 +200,10 @@ $("#login-form").onsubmit = async (e) => {
     });
     role = result.role;
     $("#password").value = "";
+    if (serverNeedsRestart) {
+      await requestRestart();
+      return;
+    }
     await start();
   } catch (err) {
     $("#login-error").textContent = err.message;
@@ -396,8 +402,9 @@ async function localConnection() {
   const s = await api("/connection");
   modal(
     "Local shop server",
-    `<p><b>Server running</b></p><p>Connect the other device to the same Wi-Fi, then scan or open this address:</p><p><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></p><img src="/api/connection/qr" class="connection-qr" alt="QR to open the shop on another device"><div class="actions"><button id="copy-shop-url">Copy address</button></div><p class="small muted">This QR opens the shop; invoice QR codes receive UPI payments. The host must stay awake. Closing this desktop leaves the server running.</p>${s.local_only ? '<p class="notice">This host is bound to localhost. Set BILLING_HOST=0.0.0.0 and restart to allow Wi-Fi clients.</p>' : ""}<p class="small">Start the host with startserver.bat or python -m billing --run-server. If another device cannot connect, allow the configured port on the private-network firewall. You can set BILLING_PUBLIC_URL for your host address.</p>`,
+    `<p><b>Server running</b></p><p>Connect the other device to the same Wi-Fi, then scan or open this address:</p><p><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></p><img src="/api/connection/qr" class="connection-qr" alt="QR to open the shop on another device"><div class="actions"><button id="copy-shop-url">Copy address</button>${role === "admin" ? '<button id="restart-shop-server">Restart backend</button>' : ""}</div><p class="small muted">This QR opens the shop; invoice QR codes receive UPI payments. The host must stay awake. Closing this desktop leaves the server running.</p>${s.local_only ? '<p class="notice">This host is bound to localhost. Set BILLING_HOST=0.0.0.0 and restart to allow Wi-Fi clients.</p>' : ""}<p class="small">Start the host with startserver.bat or python -m billing --run-server. If another device cannot connect, allow the configured port on the private-network firewall. You can set BILLING_PUBLIC_URL for your host address.</p>`,
   );
+  on("#restart-shop-server", "click", requestRestart);
   on("#copy-shop-url", "click", async () => {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(s.url);
@@ -406,6 +413,182 @@ async function localConnection() {
       prompt("Copy this shop address:", s.url);
     }
   });
+}
+
+let serverNeedsRestart = false;
+function incompatibleServer(message) {
+  $("#shell").classList.add("hidden");
+  $("#login").classList.remove("hidden");
+  $("#login-form").classList.add("hidden");
+  let panel = $("#startup-problem");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "startup-problem";
+    $("#login .login-card").append(panel);
+  }
+  panel.innerHTML = `<h2>Backend update required</h2><p class="notice">${esc(message)}</p><p>On the host, stop the old Python/Billing server (Ctrl+C in its terminal, or its --run-server process in Task Manager), then start this updated app. Use the desktop's Start / reconnect server control.</p><button id="retry-startup">Check again</button><p>Your records have not been reset.</p>`;
+  $("#retry-startup").onclick = () => location.reload();
+}
+async function reconnectBackend(result) {
+  persist();
+  modal(
+    "Restarting backend",
+    '<p>Finishing active work and reconnecting. Your committed records are preserved.</p><p id="restart-status">Waiting for the updated host…</p>',
+  );
+  const destination = new URL(result.public_url || location.href);
+  if (!result.public_url) destination.port = String(result.port);
+  // Do not poll another origin with session credentials after a port/host change.
+  if (destination.origin !== location.origin) {
+    $("#dialog-body").innerHTML =
+      `<p>Settings saved. The host is restarting at its new address.</p><a href="${esc(destination.href)}">Open the configured shop address</a><p>On the desktop, Start / reconnect reads the new local configuration.</p>`;
+    return;
+  }
+  for (let n = 0; n < 65; n++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const r = await fetch("/api/health", {
+        cache: "no-store",
+        signal: AbortSignal.timeout(1500),
+      });
+      const h = await r.json();
+      if (
+        h.api_version === 3 &&
+        !h.restarting &&
+        !h.stale_files &&
+        h.instance_id !== result.previous_instance
+      ) {
+        location.reload();
+        return;
+      }
+    } catch {}
+  }
+  $("#restart-status").textContent =
+    "The host has not returned yet. Use the desktop Start / reconnect control, or start python -m billing --run-server on the host. Open logs for the failure details.";
+}
+async function requestRestart() {
+  if (
+    !confirm(
+      "Restart the backend for all connected devices? Active requests will finish first.",
+    )
+  )
+    return;
+  const result = await api("/server/restart", { method: "POST", body: {} });
+  await reconnectBackend(result);
+}
+async function configuration() {
+  const data = await api("/admin/configuration");
+  const groups = [
+    [
+      "Company and invoice",
+      [
+        ["COMPANY_NAME", "Company name"],
+        ["COMPANY_ADDRESS", "Address"],
+        ["COMPANY_PHONE", "Contact phone"],
+        ["COMPANY_EMAIL", "Email"],
+        ["COMPANY_GSTIN", "GSTIN"],
+        ["INVOICE_TERMS", "Invoice terms"],
+      ],
+    ],
+    [
+      "Bank and payment QR",
+      [
+        ["BANK_NAME", "Bank name"],
+        ["BANK_ACCOUNT", "Bank account"],
+        ["BANK_IFSC", "IFSC"],
+        ["BANK_BRANCH", "Bank branch"],
+        ["UPI_ID", "Receiving UPI ID"],
+        ["UPI_PHONE", "UPI-linked phone (reference only)"],
+      ],
+    ],
+    [
+      "Billing defaults",
+      [
+        ["DEFAULT_TAX_MODE", "GST pricing"],
+        ["DEFAULT_GST_RATE", "Default GST rate"],
+      ],
+    ],
+    [
+      "Optional Meta WhatsApp",
+      [
+        ["WHATSAPP_PROVIDER", "Provider"],
+        ["WHATSAPP_PHONE_NUMBER_ID", "Phone-number ID"],
+        ["WHATSAPP_API_VERSION", "Graph API version"],
+        ["WHATSAPP_BILL_TEMPLATE", "Approved bill template"],
+        ["WHATSAPP_LANGUAGE", "Template language"],
+      ],
+    ],
+    [
+      "Local server and backups",
+      [
+        ["BILLING_HOST", "Network access"],
+        ["BILLING_PORT", "Server port"],
+        ["BILLING_PUBLIC_URL", "Advertised URL (optional)"],
+        ["BACKUP_KEEP", "Automatic backups to retain"],
+        ["BACKUP_INTERVAL_SECONDS", "Backup interval (seconds)"],
+      ],
+    ],
+  ];
+  const choices = {
+    DEFAULT_TAX_MODE: [
+      ["exclusive", "GST added"],
+      ["inclusive", "GST included"],
+      ["none", "Without GST"],
+    ],
+    WHATSAPP_PROVIDER: [
+      ["disabled", "Disabled"],
+      ["meta", "Meta Cloud API"],
+    ],
+    BILLING_HOST: [
+      ["0.0.0.0", "Other devices on Wi-Fi"],
+      ["127.0.0.1", "This computer only"],
+    ],
+  };
+  const field = (key, label) => {
+    const locked = data.locked.includes(key),
+      extra = locked ? "disabled" : "";
+    if (choices[key])
+      return `<label>${esc(label)}<select name="${key}" ${extra}>${choices[key].map(([v, l]) => `<option value="${v}" ${data.values[key] === v ? "selected" : ""}>${l}</option>`).join("")}</select>${locked ? "<small>Controlled by environment</small>" : ""}</label>`;
+    return formField(
+      label + (locked ? " (environment override)" : ""),
+      key,
+      data.values[key],
+      "text",
+      extra,
+    );
+  };
+  $("#content").innerHTML =
+    `<form id="settings-form" class="stack"><section class="card"><h3>Configuration</h3><p>Edit setup details here. Saving restarts the backend for connected devices. Existing invoice snapshots and database records remain intact; updated company/payment details apply to new bills.</p><p class="small">Database: <code>${esc(data.database)}</code><br>Config file: <code>${esc(data.config_file)}</code><br>Host build: ${esc(data.build)}</p></section>${groups.map(([name, fields]) => `<section class="card"><h3>${name}</h3><div class="grid2">${fields.map(([k, l]) => field(k, l)).join("")}</div>${name === "Optional Meta WhatsApp" ? `<label>New API token (blank keeps existing)<input type="password" name="whatsapp_token" autocomplete="off" ${data.locked.includes("WHATSAPP_TOKEN") ? "disabled" : ""}></label><p class="small">Stored token: ${data.whatsapp_token_set ? "configured" : "not configured"}. The saved token is never displayed.</p><label class="check"><input type="checkbox" name="clear_whatsapp_token" ${data.locked.includes("WHATSAPP_TOKEN") ? "disabled" : ""}>Remove stored token</label>` : ""}</section>`).join("")}<section class="card"><h3>Change admin password (optional)</h3><div class="grid2">${formField("Current password", "current_password", "", "password", 'autocomplete="current-password"')}${formField("New password", "new_password", "", "password", 'autocomplete="new-password" minlength="8"')}${formField("Confirm new password", "confirm_password", "", "password", 'autocomplete="new-password"')}</div><p class="small">Changing the password signs existing sessions out after restart.</p><button class="primary" ${data.restart_supported ? "" : "disabled"}>Save & restart backend</button>${data.restart_supported ? "" : '<p class="notice">Restart controls need the managed launcher: python -m billing --run-server.</p>'}<p id="settings-error" class="error"></p></section></form>`;
+  $("#settings-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target,
+      button = e.submitter;
+    button.disabled = true;
+    try {
+      const fields = values(form),
+        settings = {};
+      for (const key of Object.keys(data.values))
+        if (!data.locked.includes(key)) settings[key] = fields[key];
+      const result = await api("/admin/configuration", {
+        method: "POST",
+        body: {
+          revision: data.revision,
+          values: settings,
+          whatsapp_token: fields.whatsapp_token || "",
+          clear_whatsapp_token: form.elements.clear_whatsapp_token.checked,
+          current_password: fields.current_password,
+          new_password: fields.new_password,
+          confirm_password: fields.confirm_password,
+        },
+      });
+      form
+        .querySelectorAll("input[type=password]")
+        .forEach((e) => (e.value = ""));
+      await reconnectBackend(result);
+    } catch (err) {
+      $("#settings-error").textContent = err.message;
+      button.disabled = false;
+    }
+  };
 }
 
 const titles = {
@@ -418,6 +601,7 @@ const titles = {
   stats: "Shop overview",
   messages: "WhatsApp updates",
   status: "Backup & activity",
+  configuration: "Configuration",
 };
 async function navigate(name) {
   if (role !== "admin" && name !== "billing") return;
@@ -438,6 +622,7 @@ async function navigate(name) {
     stats,
     messages,
     status,
+    configuration,
   }[name]();
 }
 function billPayload() {
@@ -1480,6 +1665,27 @@ async function status() {
 }
 async function boot() {
   try {
+    const health = await api("/health");
+    if (
+      health.application !== "cloth-shop-billing" ||
+      health.api_version !== 3 ||
+      !["reports", "customer_profiles", "configuration", "connection"].every(
+        (c) => health.capabilities?.includes(c),
+      )
+    ) {
+      incompatibleServer(
+        "The running backend does not support this app version. This is a server/version mismatch, not an empty database.",
+      );
+      return;
+    }
+    if (health.stale_files) {
+      serverNeedsRestart = true;
+      showLogin("admin");
+      $("#role").disabled = true;
+      $("#login-error").textContent =
+        "Server files were updated but the old Python process is still running. Sign in as admin to restart the backend.";
+      return;
+    }
     config = await api("/config");
     $("#login-company").textContent = config.company.name;
     document.title = config.company.name + " · Billing";

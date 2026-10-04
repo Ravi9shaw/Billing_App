@@ -2,6 +2,7 @@
 
 import getpass
 import os
+import tempfile
 from pathlib import Path
 from .config import Settings, hash_password
 from .payments import valid_upi_id
@@ -9,10 +10,10 @@ from .payments import valid_upi_id
 
 def save_settings(values, settings=None):
     settings = settings or Settings()
-    path = Path(os.environ.get("BILLING_ENV_FILE", settings.data_dir / ".env"))
+    path = settings.env_path
     existing = {}
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 existing[k] = v
@@ -25,12 +26,16 @@ def save_settings(values, settings=None):
             raise ValueError("Configuration values must be single line")
         existing[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".env.tmp")
-    temp.write_text(
-        "\n".join(k + "=" + v for k, v in existing.items()) + "\n", encoding="utf-8"
-    )
-    temp.chmod(0o600)
-    os.replace(temp, path)
+    fd, filename = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
+    temp = Path(filename)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(k + "=" + v for k, v in existing.items()) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
     return path
 
 

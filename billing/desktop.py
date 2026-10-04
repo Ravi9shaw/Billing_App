@@ -1,28 +1,40 @@
 """Thin native window: desktop and browser run the same authenticated application."""
 
-import json
 import os
-import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 from .config import Settings, hash_password
 
 
-def configure_rendering():
-    # Qt Quick software rendering and Chromium software compositing avoid Vulkan
-    # initialization on older graphics drivers. Allow explicit deployment overrides.
-    if os.environ.get("BILLING_SOFTWARE_RENDERING", "true").lower() == "true":
-        os.environ.setdefault("QT_QUICK_BACKEND", "software")
-        os.environ.setdefault(
-            "QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-features=Vulkan"
-        )
+def configure_rendering(values=None):
+    values = values or os.environ
+    if values.get("BILLING_SOFTWARE_RENDERING", "true").lower() == "true":
+        # Force both Qt's RHI selection and Chromium's renderer out of Vulkan.
+        # QT_QUICK_BACKEND alone does not choose Qt WebEngine's RHI backend.
+        os.environ["QT_QUICK_BACKEND"] = "software"
+        os.environ["QSG_RHI_BACKEND"] = "opengl"
+        os.environ["QT_OPENGL"] = "software"
+        flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        if "--disable-gpu" not in flags.split():
+            flags += " --disable-gpu"
+        import re
+
+        found = re.search(r"--disable-features=([^ ]+)", flags)
+        if found:
+            features = found.group(1).split(",")
+            if "Vulkan" not in features:
+                flags = flags.replace(found.group(0), found.group(0) + ",Vulkan")
+        else:
+            flags += " --disable-features=Vulkan"
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = flags.strip()
 
 
 def main():
-    configure_rendering()
+    s = Settings()
+    configure_rendering(s.values)
     from PySide6.QtCore import QUrl, QTimer
+    from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
         QApplication,
         QMainWindow,
@@ -32,13 +44,14 @@ def main():
         QLineEdit,
         QDialogButtonBox,
         QFileDialog,
+        QInputDialog,
+        QLabel,
     )
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
     app = QApplication(sys.argv)
     app.setApplicationName("Shop Billing")
-    s = Settings()
     if not s.admin_hash and not s.server_url:
         from .setup import save_settings
 
@@ -89,7 +102,6 @@ def main():
                     "WHATSAPP_BILL_TEMPLATE": template.text(),
                 }
                 save_settings(values, s)
-                os.environ.update(values)
                 dialog.accept()
             except ValueError as e:
                 QMessageBox.warning(dialog, "Check setup", str(e))
@@ -98,43 +110,9 @@ def main():
         if dialog.exec() != QDialog.Accepted:
             return
         s = Settings()
-    url = s.server_url or f"http://127.0.0.1:{s.port}"
+    from .host import Host
 
-    def ready():
-        try:
-            with urllib.request.urlopen(url + "/api/health", timeout=0.5) as r:
-                data = json.load(r)
-                return (
-                    data.get("application") == "cloth-shop-billing"
-                    and data.get("api_version") == 2
-                )
-        except Exception:
-            return False
-
-    if not ready() and not s.server_url:
-        logdir = s.data_dir / "logs"
-        logdir.mkdir(exist_ok=True)
-        command = (
-            [sys.executable, "--run-server"]
-            if getattr(sys, "frozen", False)
-            else [sys.executable, "-m", "billing", "--run-server"]
-        )
-        flags = (
-            (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
-            if os.name == "nt"
-            else 0
-        )
-        with open(logdir / "launcher.log", "ab") as log:
-            subprocess.Popen(
-                command,
-                cwd=str(Path(__file__).resolve().parent.parent),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                creationflags=flags,
-                start_new_session=os.name != "nt",
-                env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-            )
+    host = Host(s)
 
     # The server intentionally survives desktop closure so browser tills remain connected.
     class View(QWebEngineView):
@@ -178,26 +156,93 @@ def main():
     window.setCentralWidget(view)
     window.resize(1360, 900)
     window.setWindowTitle(s.company["name"] + " · Billing")
-    view.setHtml(
-        '<html><body style="font:20px Segoe UI;padding:60px;background:#f5f7f5"><h2>Starting your shop…</h2><p>Connecting to the shared billing server.</p></body></html>'
-    )
+    toolbar = window.addToolBar("Server controls")
+    toolbar.setMovable(False)
+    connect_action = toolbar.addAction("Start / reconnect server")
+    restart_action = toolbar.addAction("Restart local server")
+    browser_action = toolbar.addAction("Open in browser")
+    logs_action = toolbar.addAction("Open logs")
+    status_label = QLabel("Checking backend…")
+    toolbar.addWidget(status_label)
     window.show()
-    started = time.monotonic()
     timer = QTimer()
-    timer.setInterval(350)
+    timer.setInterval(800)
+    started = time.monotonic()
+
+    def explain(message):
+        from html import escape
+
+        view.setHtml(
+            '<html><body style="font:16px sans-serif;padding:35px;background:#f5f7f5"><h2>Billing server connection</h2><p>'
+            + escape(message)
+            + "</p><p>Use the controls above to start/reconnect, restart a compatible host, open logs, or use your normal browser. Your database has not been reset.</p><p>Database: "
+            + escape(str(host.settings.db_path))
+            + "</p></body></html>"
+        )
+        status_label.setText(message[:100])
 
     def check():
-        if ready():
+        state, message = host.probe()
+        status_label.setText(message[:100])
+        if state == "ready":
             timer.stop()
-            view.load(QUrl(url))
-        elif time.monotonic() - started > 40:
+            view.load(QUrl(host.url))
+        elif state not in ("offline", "starting"):
             timer.stop()
-            QMessageBox.critical(
-                window,
-                "Server could not start",
-                f"Could not reach {url}.\nCheck the server address, port and {s.data_dir / 'logs'}.\nYour existing data has not been reset.",
+            explain(message)
+        elif host.child and host.child.poll() is not None:
+            timer.stop()
+            explain(
+                f"The backend exited with code {host.child.returncode}. Open logs to see the startup error. If another older server holds the database lock, stop that host first, then reconnect."
+            )
+        elif time.monotonic() - started > 45:
+            timer.stop()
+            explain(
+                message
+                + " Startup did not complete. Check the server address and launcher/server logs, then use Start / reconnect."
             )
 
+    def connect_host():
+        nonlocal host, started
+        timer.stop()
+        try:
+            host = Host(Settings())
+            state, message = host.start()
+            explain(message)
+            started = time.monotonic()
+            restart_action.setEnabled(not host.settings.server_url)
+            timer.start()
+        except Exception as exc:
+            explain(str(exc))
+
+    def restart_host():
+        password, accepted = QInputDialog.getText(
+            window, "Restart backend", "Admin password", QLineEdit.Password
+        )
+        if not accepted:
+            return
+        try:
+            host.restart(password)
+
+            def wait_for_restart():
+                nonlocal host, started
+                host = Host(Settings())
+                started = time.monotonic()
+                timer.start()
+
+            QTimer.singleShot(1800, wait_for_restart)
+            explain("Restart requested. Waiting for active work and backups to finish…")
+        except Exception as exc:
+            QMessageBox.warning(window, "Restart could not complete", str(exc))
+
+    connect_action.triggered.connect(connect_host)
+    restart_action.triggered.connect(restart_host)
+    browser_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(host.url)))
+    logs_action.triggered.connect(
+        lambda: QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(host.settings.data_dir / "logs"))
+        )
+    )
     timer.timeout.connect(check)
-    timer.start()
+    QTimer.singleShot(0, connect_host)
     sys.exit(app.exec())

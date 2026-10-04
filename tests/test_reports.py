@@ -190,4 +190,6 @@ def test_lan_connection_is_authenticated_and_software_rendering_optional(
     assert "--disable-gpu" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
     monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--custom-override")
     configure_rendering()
-    assert os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] == "--custom-override"
+    assert "--custom-override" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "--disable-features=Vulkan" in os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert os.environ["QSG_RHI_BACKEND"] == "opengl"

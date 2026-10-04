@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 from .config import Settings, verify_password
 from .database import Database, Conflict
 from .money import money, iso_date
-from .models import BillBody, ItemBody, CustomerBody, PaymentBody
+from .models import BillBody, ItemBody, CustomerBody, PaymentBody, ConfigurationBody
+from .version import API_VERSION, BUILD_ID, CAPABILITIES, source_build
 
 FRONTEND = Path(__file__).resolve().parent / "web"
 
@@ -58,12 +59,23 @@ def create_app(settings=None):
     )
     app.state.db = db
     app.state.settings = settings
+    app.state.instance_id = secrets.token_hex(16)
+    app.state.restart_callback = None
+    app.state.restarting = threading.Event()
+    config_lock = threading.Lock()
     attempts = {}
     attempt_lock = threading.Lock()
 
     @app.middleware("http")
     async def security(request, call_next):
         if request.method not in ("GET", "HEAD", "OPTIONS"):
+            if app.state.restarting.is_set():
+                return JSONResponse(
+                    {
+                        "detail": "Server is restarting. Reconnect and retry the same request."
+                    },
+                    status_code=503,
+                )
             origin = request.headers.get("origin")
             if origin and urlsplit(origin).netloc != request.headers.get("host"):
                 return JSONResponse(
@@ -123,9 +135,12 @@ def create_app(settings=None):
             status_code=503,
         )
 
+    def session_digest(token):
+        return hashlib.sha256((token + settings.admin_hash).encode()).hexdigest()
+
     def session(request: Request):
         token = request.cookies.get("billing_session", "")
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = session_digest(token)
         with db._conn() as c:
             r = c.execute(
                 "SELECT role FROM sessions WHERE token_hash=? AND expires>?",
@@ -150,7 +165,17 @@ def create_app(settings=None):
     def health():
         with db._conn() as c:
             c.execute("SELECT 1").fetchone()
-        return {"status": "ok", "application": "cloth-shop-billing", "api_version": 2}
+        return {
+            "status": "ok",
+            "application": "cloth-shop-billing",
+            "api_version": API_VERSION,
+            "build": BUILD_ID,
+            "instance_id": app.state.instance_id,
+            "capabilities": CAPABILITIES,
+            "stale_files": source_build() != BUILD_ID,
+            "storage_id": hashlib.sha256(str(settings.db_path).encode()).hexdigest(),
+            "restarting": app.state.restarting.is_set(),
+        }
 
     @app.get("/api/config")
     def config():
@@ -191,12 +216,12 @@ def create_app(settings=None):
             old = request.cookies.get("billing_session", "")
             c.execute(
                 "DELETE FROM sessions WHERE token_hash=? OR expires<?",
-                (hashlib.sha256(old.encode()).hexdigest(), time.time()),
+                (session_digest(old), time.time()),
             )
             c.execute(
                 "INSERT INTO sessions VALUES(?,?,?)",
                 (
-                    hashlib.sha256(token.encode()).hexdigest(),
+                    session_digest(token),
                     body.role,
                     time.time() + 8 * 3600,
                 ),
@@ -220,14 +245,67 @@ def create_app(settings=None):
         with db._conn(write=True) as c:
             c.execute(
                 "DELETE FROM sessions WHERE token_hash=?",
-                (
-                    hashlib.sha256(
-                        request.cookies.get("billing_session", "").encode()
-                    ).hexdigest(),
-                ),
+                (session_digest(request.cookies.get("billing_session", "")),),
             )
         response.delete_cookie("billing_session")
         return {"ok": True}
+
+    @app.get("/api/admin/configuration")
+    def configuration(role=Depends(admin)):
+        from .admin_config import public_settings
+
+        result = public_settings(settings)
+        result["restart_supported"] = app.state.restart_callback is not None
+        result["build"] = BUILD_ID
+        return result
+
+    def schedule_restart(payload):
+        from starlette.background import BackgroundTask
+
+        if app.state.restart_callback is None:
+            raise HTTPException(
+                409,
+                "This server was started by an external host. Restart that host, or use python -m billing --run-server for managed restart.",
+            )
+        app.state.restarting.set()
+        return JSONResponse(
+            {**payload, "previous_instance": app.state.instance_id},
+            background=BackgroundTask(app.state.restart_callback),
+        )
+
+    @app.post("/api/admin/configuration")
+    def configuration_save(body: ConfigurationBody, role=Depends(admin)):
+        from .admin_config import update
+
+        with config_lock:
+            if app.state.restart_callback is None:
+                raise HTTPException(
+                    409,
+                    "Start the backend with python -m billing --run-server to save and restart from Configuration.",
+                )
+            db.backup_database(reason="before-configuration")
+            result = update(settings, body.model_dump())
+            with db._conn(write=True) as c:
+                db.audit(
+                    c,
+                    role,
+                    "configuration-update",
+                    "settings",
+                    {"changed_fields": result["changed"]},
+                )
+            return schedule_restart({**result, "restart_requested": True})
+
+    @app.post("/api/server/restart")
+    def restart_server(role=Depends(admin)):
+        with config_lock:
+            db.backup_database(reason="before-restart")
+            return schedule_restart(
+                {
+                    "restart_requested": True,
+                    "port": settings.port,
+                    "public_url": settings.public_url,
+                }
+            )
 
     @app.get("/api/reports/{kind}/csv")
     def report_csv(kind: str, request: Request, role=Depends(admin)):

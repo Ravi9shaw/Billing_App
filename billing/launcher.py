@@ -47,12 +47,55 @@ def run_server():
     from .lock import server_lock
 
     # No formatter references absent console streams in a Windows windowed executable.
+    restart_requested = False
     with server_lock(settings.db_path):
-        uvicorn.run(
-            create_app(settings),
-            host=settings.host,
-            port=settings.port,
-            log_config=None,
-            access_log=False,
-            timeout_graceful_shutdown=40,
+        application = create_app(settings)
+        server = uvicorn.Server(
+            uvicorn.Config(
+                application,
+                host=settings.host,
+                port=settings.port,
+                log_config=None,
+                access_log=False,
+                timeout_graceful_shutdown=40,
+            )
         )
+
+        def restart():
+            nonlocal restart_requested
+            restart_requested = True
+            server.should_exit = True
+
+        application.state.restart_callback = restart
+        server.run()
+    if restart_requested:
+        # A fresh interpreter is essential after updating Python files on disk.
+        import subprocess
+        import os
+
+        command = (
+            [sys.executable, "--run-server"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, "-m", "billing", "--run-server"]
+        )
+        from pathlib import Path
+
+        with open(settings.data_dir / "logs" / "launcher.log", "ab") as output:
+            subprocess.Popen(
+                command,
+                cwd=str(
+                    settings.data_dir
+                    if getattr(sys, "frozen", False)
+                    else Path(__file__).resolve().parent.parent
+                ),
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=output,
+                start_new_session=os.name != "nt",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                )
+                if os.name == "nt"
+                else 0,
+                env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+            )
