@@ -10,7 +10,18 @@ from pathlib import Path
 from .config import Settings, hash_password
 
 
+def configure_rendering():
+    # Qt Quick software rendering and Chromium software compositing avoid Vulkan
+    # initialization on older graphics drivers. Allow explicit deployment overrides.
+    if os.environ.get("BILLING_SOFTWARE_RENDERING", "true").lower() == "true":
+        os.environ.setdefault("QT_QUICK_BACKEND", "software")
+        os.environ.setdefault(
+            "QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-features=Vulkan"
+        )
+
+
 def main():
+    configure_rendering()
     from PySide6.QtCore import QUrl, QTimer
     from PySide6.QtWidgets import (
         QApplication,
@@ -39,6 +50,7 @@ def main():
         password.setEchoMode(QLineEdit.Password)
         confirm = QLineEdit()
         confirm.setEchoMode(QLineEdit.Password)
+        upi_phone = QLineEdit(s.company.get("upi_phone", ""))
         upi = QLineEdit(s.company.get("upi_id", ""))
         upi.setPlaceholderText("yourshop@bank")
         token = QLineEdit()
@@ -49,7 +61,8 @@ def main():
             ("Company name", name),
             ("Admin password (8+ characters)", password),
             ("Confirm password", confirm),
-            ("Receiving UPI ID (optional)", upi),
+            ("UPI-linked phone (optional reference)", upi_phone),
+            ("Receiving UPI ID from payment app (optional)", upi),
             ("WhatsApp API token (optional)", token),
             ("WhatsApp phone number ID (optional)", phone),
             ("Approved invoice template (optional)", template),
@@ -68,6 +81,7 @@ def main():
                 values = {
                     "COMPANY_NAME": name.text().strip(),
                     "UPI_ID": upi.text().strip(),
+                    "UPI_PHONE": upi_phone.text().strip(),
                     "ADMIN_PASSWORD_HASH": hash_password(password.text()),
                     "WHATSAPP_PROVIDER": "meta" if token.text() else "disabled",
                     "WHATSAPP_TOKEN": token.text(),

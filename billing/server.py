@@ -229,6 +229,75 @@ def create_app(settings=None):
         response.delete_cookie("billing_session")
         return {"ok": True}
 
+    @app.get("/api/reports/{kind}/csv")
+    def report_csv(kind: str, request: Request, role=Depends(admin)):
+        from .reports import export_csv, query
+        from fastapi.responses import StreamingResponse
+
+        _, _, _, _, bounds = query(kind, request.query_params)
+        filename = f"{kind}-{bounds[0] or 'all'}-to-{bounds[1]}.csv"
+        return StreamingResponse(
+            export_csv(db, kind, request.query_params),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/reports/{kind}")
+    def reporting(kind: str, request: Request, role=Depends(admin)):
+        from .reports import report, overview
+
+        return (
+            overview(db, request.query_params)
+            if kind == "overview"
+            else report(db, kind, request.query_params)
+        )
+
+    def connection_info():
+        from .launcher import lan_ip
+
+        url = (
+            settings.public_url
+            or f"http://{lan_ip() if settings.host in ('0.0.0.0', '::') else settings.host}:{settings.port}"
+        )
+        return {
+            "url": url,
+            "local_only": settings.host in ("localhost", "127.0.0.1", "::1"),
+            "status": "running",
+        }
+
+    @app.get("/api/connection")
+    def connection(role=Depends(session)):
+        return connection_info()
+
+    @app.get("/api/connection/qr")
+    def connection_qr(role=Depends(session)):
+        import qrcode
+        from io import BytesIO
+
+        out = BytesIO()
+        qrcode.make(connection_info()["url"]).save(out, format="PNG")
+        return Response(out.getvalue(), media_type="image/png")
+
+    @app.get("/api/customers/{cid}/profile")
+    def customer_profile(cid: int, role=Depends(admin)):
+        from .reports import BILLS, wishlist_demand
+
+        with db._conn() as c:
+            row = c.execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
+            if not row:
+                raise HTTPException(404, "Customer not found")
+            summary = dict(
+                c.execute(
+                    f"WITH sale AS ({BILLS}) SELECT COUNT(*) AS visits,MAX(bill_date) AS last_visit,COALESCE(SUM(total),0) AS total,COALESCE(SUM(paid_amount),0) AS paid,COALESCE(SUM(balance),0) AS outstanding FROM sale WHERE customer_id=?",
+                    (cid,),
+                ).fetchone()
+            )
+            return {
+                "customer": dict(row),
+                "summary": summary,
+                "demand": wishlist_demand(c, cid),
+            }
+
     @app.get("/api/categories")
     def categories(role=Depends(session)):
         return listing(db.get_categories())
@@ -314,11 +383,17 @@ def create_app(settings=None):
     def customers(search: str = "", offset: int = 0, role=Depends(session)):
         with db._conn() as c:
             rs = c.execute(
-                "SELECT * FROM customers WHERE name LIKE ? OR phone LIKE ? ORDER BY name LIMIT 100 OFFSET ?",
+                "SELECT customers.*,(SELECT COUNT(*) FROM bills WHERE customer_id=customers.id) AS visits,(SELECT MAX(bill_date) FROM bills WHERE customer_id=customers.id) AS last_visit FROM customers WHERE name LIKE ? OR phone LIKE ? ORDER BY name,id LIMIT 100 OFFSET ?",
                 (f"%{search}%", f"%{search}%", max(offset, 0)),
             ).fetchall()
         if role == "employee":
-            return [{k: r[k] for k in ["id", "name", "phone", "address"]} for r in rs]
+            return [
+                {
+                    k: r[k]
+                    for k in ["id", "name", "phone", "address", "visits", "last_visit"]
+                }
+                for r in rs
+            ]
         return listing(rs)
 
     @app.post("/api/customers")

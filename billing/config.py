@@ -59,6 +59,22 @@ class Settings:
         )
         self.port = int(os.environ.get("BILLING_PORT", "5000"))
         self.host = os.environ.get("BILLING_HOST", "0.0.0.0")
+        self.public_url = os.environ.get("BILLING_PUBLIC_URL", "").rstrip("/")
+        if self.public_url:
+            from urllib.parse import urlsplit
+
+            url = urlsplit(self.public_url)
+            if (
+                url.scheme not in ("http", "https")
+                or not url.netloc
+                or url.username
+                or url.password
+                or url.query
+                or url.fragment
+            ):
+                raise ValueError(
+                    "BILLING_PUBLIC_URL must be an HTTP(S) shop URL without credentials, query or fragment"
+                )
         self.server_url = os.environ.get("BILLING_SERVER_URL", "").rstrip("/")
         self.admin_hash = os.environ.get("ADMIN_PASSWORD_HASH", "")
         self.company = {
@@ -74,6 +90,7 @@ class Settings:
                 ("bank_ifsc", "BANK_IFSC", ""),
                 ("bank_branch", "BANK_BRANCH", ""),
                 ("upi_id", "UPI_ID", ""),
+                ("upi_phone", "UPI_PHONE", ""),
                 ("terms", "INVOICE_TERMS", "Thank you for your business."),
             ]
         }

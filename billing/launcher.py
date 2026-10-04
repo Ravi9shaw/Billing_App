@@ -29,7 +29,14 @@ def run_server():
 
     settings = Settings()
     configure_logging(settings)
-    url = f"http://{lan_ip()}:{settings.port}"
+    url = (
+        settings.public_url
+        or f"http://{lan_ip() if settings.host in ('0.0.0.0', '::') else settings.host}:{settings.port}"
+    )
+    import sys
+
+    if sys.stdout is not None:
+        print(f"Shop server: {url} — connect devices on the same Wi-Fi", flush=True)
     try:
         import qrcode
 

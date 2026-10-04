@@ -291,6 +291,9 @@ class Database(Queries):
                     discount=discount,
                     gst_rate=gst,
                     hsn=item["hsn"],
+                    category_snapshot=c.execute(
+                        "SELECT name FROM categories WHERE id=?", (item["category_id"],)
+                    ).fetchone()[0],
                 )
             )
         return calculate(lines, mode, interstate)
@@ -459,7 +462,7 @@ class Database(Queries):
                     (deducted, line["item_id"]),
                 )
                 c.execute(
-                    """INSERT INTO bill_items(bill_id,item_id,item_name_snapshot,quantity,rate,subtotal,gst_rate,gst_amount,discount,stock_deducted,hsn,cgst,sgst,igst) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO bill_items(bill_id,item_id,item_name_snapshot,quantity,rate,subtotal,gst_rate,gst_amount,discount,stock_deducted,hsn,cgst,sgst,igst,category_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         bid,
                         line["item_id"],
@@ -475,6 +478,7 @@ class Database(Queries):
                         line["cgst"],
                         line["sgst"],
                         line["igst"],
+                        line["category_snapshot"],
                     ),
                 )
             if not edit_id and paid > 0:

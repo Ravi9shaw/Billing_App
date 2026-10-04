@@ -602,3 +602,62 @@ a {
     transition: none !important;
   }
 }
+.period-controls {
+  margin: 12px 0;
+}
+.chart-scroll {
+  overflow-x: auto;
+  padding: 12px 0;
+}
+.daily-chart {
+  display: flex;
+  gap: 7px;
+  min-height: 245px;
+  align-items: end;
+}
+.chart-column {
+  flex: 1 0 65px;
+  border: 0;
+  background: transparent;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.chart-value {
+  white-space: nowrap;
+  font-size: 10px;
+}
+.chart-track {
+  height: 170px;
+  width: 100%;
+  max-width: 40px;
+  display: flex;
+  align-items: end;
+  background: #edf3f0;
+  border-radius: 5px 5px 0 0;
+}
+.chart-track span {
+  width: 100%;
+  background: var(--green);
+  border-radius: 5px 5px 0 0;
+  min-height: 1px;
+}
+.chart-column:hover .chart-track span,
+.chart-column:focus .chart-track span {
+  background: #c37d27;
+}
+.connection-qr {
+  display: block;
+  width: 230px;
+  max-width: 100%;
+  margin: 15px auto;
+}
+#overview-results {
+  margin-top: 18px;
+}
+#overview-results .grid2 {
+  align-items: start;
+}

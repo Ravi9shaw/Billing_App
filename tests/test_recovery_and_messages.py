@@ -197,7 +197,7 @@ def test_setup_preserves_existing_records_and_optional_settings(
     ]
     env_file = settings.data_dir / ".env"
     env_file.write_text("BANK_NAME=Existing Bank\nCOMPANY_ADDRESS=\n", encoding="utf-8")
-    answers = iter(["Configured Shop", "synthetic@bank", "disabled", "n"])
+    answers = iter(["Configured Shop", "9000000000", "synthetic@bank", "disabled", "n"])
     passwords = iter(["new-test-password", "new-test-password"])
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     monkeypatch.setattr(setup.getpass, "getpass", lambda _: next(passwords))

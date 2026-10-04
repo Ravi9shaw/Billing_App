@@ -46,6 +46,14 @@ def main():
         values["ADMIN_PASSWORD_HASH"] = hash_password(password)
     elif not s.admin_hash:
         raise ValueError("An admin password is required for first setup")
+    phone = input(
+        "UPI-linked phone (optional reference only; blank keeps current): "
+    ).strip()
+    if phone:
+        values["UPI_PHONE"] = phone
+    print(
+        "Copy the receiving UPI ID from your payment app. A phone number alone cannot identify the receiving account here."
+    )
     upi = input(
         "Receiving UPI ID (e.g. yourshop@bank; optional, blank keeps current): "
     ).strip()

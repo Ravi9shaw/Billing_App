@@ -260,8 +260,154 @@ async function start() {
     persist();
   }
   categories = await api("/categories");
+  if (!$("#connect-device")) {
+    const button = document.createElement("button");
+    button.id = "connect-device";
+    button.textContent = "Local server / connect device";
+    $(".header-actions").append(button);
+    on("#connect-device", "click", localConnection);
+  }
   await navigate("billing");
 }
+const reportStates = {};
+function metricCards(values) {
+  return (
+    '<div class="metrics">' +
+    values
+      .map(
+        ([label, value]) =>
+          `<div class="card"><p class="eyebrow">${esc(label)}</p><div class="metric">${esc(value)}</div></div>`,
+      )
+      .join("") +
+    "</div>"
+  );
+}
+function periodControls(id, initial = "30days") {
+  const s = (reportStates[id] ||= {
+    period: initial,
+    month: today().slice(0, 7),
+    year: today().slice(0, 4),
+  });
+  return `<div class="toolbar period-controls"><label>Period<select id="${id}-period">${[
+    ["all", "All time / till date"],
+    ["today", "Today"],
+    ["7days", "Last 7 days"],
+    ["30days", "Last 30 days"],
+    ["month", "Choose month"],
+    ["lastmonth", "Last month"],
+    ["3months", "Last 3 full months"],
+    ["year", "Choose year"],
+    ["custom", "Custom dates"],
+  ]
+    .map(
+      ([v, l]) =>
+        `<option value="${v}" ${s.period === v ? "selected" : ""}>${l}</option>`,
+    )
+    .join(
+      "",
+    )}</select></label><label>Month<input id="${id}-month" type="month" value="${esc(s.month || today().slice(0, 7))}"></label><label>Year<input id="${id}-year" type="number" min="1900" max="9998" value="${esc(s.year || today().slice(0, 4))}"></label><label>From<input id="${id}-from" type="date" value="${esc(s.date_from || "")}"></label><label>To<input id="${id}-to" type="date" value="${esc(s.date_to || "")}"></label><button id="${id}-apply">Apply</button></div>`;
+}
+function periodParams(id) {
+  const s = {
+    period: $("#" + id + "-period").value,
+    month: $("#" + id + "-month").value,
+    year: $("#" + id + "-year").value,
+    date_from: $("#" + id + "-from").value,
+    date_to: $("#" + id + "-to").value,
+  };
+  reportStates[id] = { ...reportStates[id], ...s };
+  return new URLSearchParams(s);
+}
+function bindPeriod(id, refresh) {
+  const changed = () =>
+    Promise.resolve(refresh()).catch((e) => toast(e.message, true));
+  on("#" + id + "-apply", "click", refresh);
+  $("#" + id + "-period").onchange = changed;
+  for (const [field, choice] of [
+    ["month", "month"],
+    ["year", "year"],
+    ["from", "custom"],
+    ["to", "custom"],
+  ]) {
+    $("#" + id + "-" + field).onchange = () => {
+      $("#" + id + "-period").value = choice;
+      return changed();
+    };
+  }
+}
+function showBounds(id, data) {
+  $("#" + id + "-from").value = data.date_from || "";
+  $("#" + id + "-to").value = data.date_to || "";
+}
+function pager(id) {
+  return `<div class="actions"><button id="${id}-prev">Previous</button><span id="${id}-count"></span><button id="${id}-next">Next</button></div>`;
+}
+function pageInfo(id, data) {
+  $("#" + id + "-prev").disabled = data.offset === 0;
+  $("#" + id + "-next").disabled =
+    data.offset + data.rows.length >= data.summary.count;
+  $("#" + id + "-count").textContent =
+    `${data.summary.count ? data.offset + 1 : 0}–${data.offset + data.rows.length} of ${data.summary.count}`;
+}
+async function customerProfile(id) {
+  const data = await api("/customers/" + id + "/profile"),
+    c = data.customer,
+    s = data.summary;
+  modal(
+    c.name + " · customer profile",
+    `<p>${esc(c.phone || "No phone")} · ${esc(c.address || "No address")}</p>${metricCards(
+      [
+        ["Purchase visits", s.visits],
+        ["Total billed", rs(s.total)],
+        ["Received", rs(s.paid)],
+        ["Outstanding", rs(s.outstanding)],
+      ],
+    )}<p>Last purchase: ${esc(s.last_visit || "No purchases yet")}</p><div class="actions"><button id="profile-sales">Sales & payments</button><button id="profile-wishes">Manage wishlist</button></div><h3>Repeated open requests</h3><p class="small muted">Grouped by matching text, ignoring case and surrounding spaces.</p>${table(
+      ["Request", "Times requested"],
+      data.demand.map((r) => [esc(r.request), r.requests]),
+    )}`,
+  );
+  on("#profile-wishes", "click", () => wishes(c));
+  on("#profile-sales", "click", async () => {
+    reportStates.sales = { period: "all", customer_id: id, search: "" };
+    $("#dialog").close();
+    await navigate("sales");
+  });
+}
+function verticalChart(series, granularity) {
+  const max = Math.max(1, ...series.map((r) => r.revenue));
+  return `<p class="small muted">Select a bar to open its sales. Amounts include GST. Empty dates show zero.</p><div class="chart-scroll"><div class="daily-chart">${series.map((r) => `<button class="chart-column" data-period-label="${esc(r.label)}" title="${esc(r.label)}: ${rs(r.revenue)} · ${r.bills} bills" aria-label="${esc(r.label)}: ${rs(r.revenue)}, ${r.bills} bills"><span class="chart-value">${rs(r.revenue)}</span><span class="chart-track"><span style="height:${(r.revenue / max) * 100}%"></span></span><span>${esc(granularity === "day" ? r.label.slice(5) : r.label)}</span></button>`).join("")}</div></div><details><summary>Show exact sales values</summary>${table(
+    [granularity === "day" ? "Date" : "Month", "Bills", "Sales"],
+    series.map((r) => [esc(r.label), r.bills, rs(r.revenue)]),
+  )}</details>`;
+}
+function horizontalChart(rows, field) {
+  const max = Math.max(1, ...rows.map((r) => r[field]));
+  return rows.length
+    ? rows
+        .map(
+          (r) =>
+            `<div class="bar-row"><span>${esc(r.name)}</span><div class="bar"><span style="width:${(r[field] / max) * 100}%"></span></div><b>${field === "revenue" ? rs(r[field]) : r[field]}</b></div>`,
+        )
+        .join("")
+    : '<p class="muted">No sales in this period.</p>';
+}
+async function localConnection() {
+  const s = await api("/connection");
+  modal(
+    "Local shop server",
+    `<p><b>Server running</b></p><p>Connect the other device to the same Wi-Fi, then scan or open this address:</p><p><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></p><img src="/api/connection/qr" class="connection-qr" alt="QR to open the shop on another device"><div class="actions"><button id="copy-shop-url">Copy address</button></div><p class="small muted">This QR opens the shop; invoice QR codes receive UPI payments. The host must stay awake. Closing this desktop leaves the server running.</p>${s.local_only ? '<p class="notice">This host is bound to localhost. Set BILLING_HOST=0.0.0.0 and restart to allow Wi-Fi clients.</p>' : ""}<p class="small">Start the host with startserver.bat or python -m billing --run-server. If another device cannot connect, allow the configured port on the private-network firewall. You can set BILLING_PUBLIC_URL for your host address.</p>`,
+  );
+  on("#copy-shop-url", "click", async () => {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(s.url);
+      toast("Address copied");
+    } else {
+      prompt("Copy this shop address:", s.url);
+    }
+  });
+}
+
 const titles = {
   billing: "New bill",
   inventory: "Inventory",
@@ -276,6 +422,7 @@ const titles = {
 async function navigate(name) {
   if (role !== "admin" && name !== "billing") return;
   page = name;
+  $("#content").onclick = null;
   $("#page-title").textContent = titles[name];
   $("#switch-role").classList.toggle("hidden", name !== "billing");
   document
@@ -328,7 +475,7 @@ async function updateQuote() {
 }
 async function billing() {
   $("#content").innerHTML =
-    `${editing ? `<div class="notice">Editing ${esc(editing.bill_no)}. Existing payments are preserved. A history entry will record this change.</div>` : ""}<div class="bill-grid"><div class="stack"><section class="card"><div class="row between"><h3>Customer <span class="muted small">optional</span></h3><button id="clear-customer" class="quiet small">Clear</button></div><label>Find customer<input id="customer-search" placeholder="Name or phone"></label><div id="customer-results"></div><div class="grid2">${formField("Name (optional)", "new-name", draft.customer.name || "")}${formField("Phone (optional)", "new-phone", draft.customer.phone || "")}</div>${formField("Address (optional)", "new-address", draft.customer.address || "")}<p id="customer-selected" class="small muted"></p></section><section class="card"><div class="row between"><h3>Add items</h3>${role === "admin" ? '<button id="quick-item" class="quiet">+ New item</button>' : ""}</div><label>Search or scan barcode<input id="catalog-search" autofocus placeholder="Scan barcode, or search item name"></label><p class="muted small">Employee prices come from the catalog. Select an item to add it.</p><div id="catalog" class="catalog"></div></section></div><section class="card"><div class="row between"><h3>Bill items</h3><span class="pill">${role === "admin" ? "Admin controls" : "Catalog prices"}</span></div><div id="cart"></div><div id="totals" class="summary"></div><div class="grid2"><label>GST pricing<select id="tax-mode" ${role !== "admin" ? "disabled" : ""}><option value="exclusive">GST added to price</option><option value="inclusive">GST included in price</option><option value="none">Without GST</option></select></label><label>Payment mode<select id="payment-mode"><option>Cash</option><option>UPI</option><option>Card</option><option>Other</option></select></label></div>${role === "admin" ? '<label class="check"><input id="interstate" type="checkbox">Interstate sale (IGST)</label>' : ""}<div class="grid2">${formField("Bill date", "bill-date", draft.bill_date, "date", role === "admin" ? "" : "disabled")}${formField(editing ? "Paid already (unchanged)" : "Paid now", "paid-now", draft.paid_now ?? "", "number", `min="0" step="0.01" ${editing ? "disabled" : ""}`)}</div><details><summary>Additional invoice details (optional)</summary><div class="grid2">${[
+    `${editing ? `<div class="notice">Editing ${esc(editing.bill_no)}. Existing payments are preserved. A history entry will record this change.</div>` : ""}<div class="bill-grid"><div class="stack"><section class="card"><div class="row between"><h3>Customer <span class="muted small">optional</span></h3><button id="clear-customer" class="quiet small">Clear</button></div><label>Find customer<input id="customer-search" placeholder="Name or phone"></label><div id="customer-results"></div><div class="grid2">${formField("Name (optional)", "new-name", draft.customer.name || "")}${formField("Phone (optional)", "new-phone", draft.customer.phone || "")}</div>${formField("Address (optional)", "new-address", draft.customer.address || "")}<p id="customer-selected" class="small muted"></p></section><section class="card"><div class="row between"><h3>Add items</h3>${role === "admin" ? '<button id="quick-item" class="quiet">+ New item</button>' : ""}</div><label>Search or scan barcode<input id="catalog-search" autofocus placeholder="Scan barcode, or search item name"></label><p class="muted small">Employee prices come from the catalog. Select an item to add it.</p><div id="catalog" class="catalog"></div></section></div><section class="card"><div class="row between"><h3>Bill items</h3><span class="pill">${role === "admin" ? "Admin controls" : "Catalog prices"}</span></div><div id="cart"></div><div id="totals" class="summary"></div><div class="grid2"><label>GST pricing<select id="tax-mode" ${role !== "admin" ? "disabled" : ""}><option value="exclusive">GST added to price</option><option value="inclusive">GST included in price</option><option value="none">Without GST</option></select></label><label>Payment mode<select id="payment-mode"><option>Cash</option><option>UPI</option><option>Card</option><option>Other</option></select></label></div>${role === "admin" ? '<label class="check"><input id="interstate" type="checkbox">Interstate sale (IGST)</label>' : ""}<div class="grid2">${formField("Bill date", "bill-date", draft.bill_date, "date", role === "admin" ? "" : "disabled")}${formField(editing ? "Paid already (unchanged)" : "Paid now", "paid-now", draft.paid_now ?? "", "number", `min="0" step="0.01" ${editing ? "disabled" : ""}`)}</div><p class="small muted">If payment has not arrived, enter 0 in Paid now. The unpaid invoice will show the configured UPI payment QR.</p><details><summary>Additional invoice details (optional)</summary><div class="grid2">${[
       ["book_no", "Book number"],
       ["party_gstin", "Party GSTIN"],
       ["pin_code", "Pin code"],
@@ -362,11 +509,17 @@ async function billing() {
   function selected() {
     const has = !!customer;
     $("#customer-selected").textContent = has
-      ? `Using ${customer.name}. Saved details will not be overwritten.`
+      ? `Using ${customer.name} · ${customer.visits ?? 0} purchase visits · Last: ${(customer.last_visit || "Never").slice(0, 10)}. Saved details will not be overwritten.`
       : "Leave details blank for a walk-in sale.";
-    ["new-name", "new-phone", "new-address"].forEach(
-      (n) => ($(`[name=${n}]`).disabled = has),
-    );
+    for (const [n, field] of [
+      ["new-name", "name"],
+      ["new-phone", "phone"],
+      ["new-address", "address"],
+    ]) {
+      const input = $(`[name=${n}]`);
+      input.disabled = has;
+      if (has) input.value = customer[field] || "";
+    }
   }
   selected();
   on("#clear-customer", "click", () => {
@@ -802,44 +955,32 @@ async function customers() {
     );
     if (page !== "customers" || query !== $("#cust-search").value) return;
     $("#customers-list").innerHTML = table(
-      ["Name", "Phone", "WhatsApp", "Actions"],
+      ["Name", "Phone", "Purchase visits", "WhatsApp", "Actions"],
       list.map((c) => [
         esc(c.name),
         esc(c.phone || "—"),
+        c.visits,
         c.whatsapp_opt_in ? "Opted in" : "Not subscribed",
-        `<button data-edit="${c.id}">Edit</button> <button data-history="${c.id}">History</button> <button data-wish="${c.id}">Wishlist</button> <button class="danger" data-delete="${c.id}">Delete</button>`,
+        `<button data-profile="${c.id}">Profile / balance</button> <button data-edit="${c.id}">Edit</button> <button data-history="${c.id}">History</button> <button data-wish="${c.id}">Wishlist</button> <button class="danger" data-delete="${c.id}">Delete</button>`,
       ]),
     );
     $("#cust-prev").disabled = offset === 0;
     $("#cust-next").disabled = list.length < 100;
     $("#customers-list").onclick = action(async (e) => {
       const cid = Number(
-          e.target.dataset.edit ||
+          e.target.dataset.profile ||
+            e.target.dataset.edit ||
             e.target.dataset.history ||
             e.target.dataset.delete ||
             e.target.dataset.wish,
         ),
         c = list.find((x) => x.id === cid);
       if (!c) return;
+      if (e.target.dataset.profile) return customerProfile(cid);
       if (e.target.dataset.edit) return customerForm(c, refresh);
       if (e.target.dataset.history) {
-        const rows = await api("/customers/" + cid + "/history");
-        modal(
-          c.name + " · purchase history",
-          table(
-            ["Bill", "Date", "Total", ""],
-            rows.map((b) => [
-              esc(b.bill_no),
-              esc(b.bill_date),
-              rs(b.total),
-              `<button data-receipt="${b.id}">View / print</button>`,
-            ]),
-          ),
-        );
-        $("#dialog-body").onclick = action(async (ev) => {
-          if (ev.target.dataset.receipt)
-            await receipt(Number(ev.target.dataset.receipt));
-        });
+        reportStates.sales = { period: "all", customer_id: cid, search: "" };
+        await navigate("sales");
       } else if (e.target.dataset.wish) await wishes(c);
       else if (
         confirm(
@@ -905,19 +1046,33 @@ async function wishes(c) {
   });
 }
 async function sales() {
+  const state = (reportStates.sales ||= { period: "30days" });
   $("#content").innerHTML =
-    '<section class="card"><div class="toolbar"><label>Search<input id="sales-search" placeholder="Invoice or customer"></label><label>From<input type="date" id="date-from"></label><label>To<input type="date" id="date-to"></label><button id="sales-refresh">Apply</button><button id="sales-csv">Export these rows</button></div><div id="sales-list"></div><div class="actions"><button id="sales-prev">Previous</button><button id="sales-next">Next</button></div></section>';
+    '<div id="sales-totals"></div><section class="card">' +
+    periodControls("sales") +
+    `<div class="toolbar"><label>Find invoice or customer<input id="sales-search" placeholder="Name, phone or invoice" value="${esc(state.search || "")}"></label><a id="sales-csv" download>Export all matching sales (CSV)</a>${state.customer_id ? '<button id="clear-sales-customer">Show all customers</button>' : ""}</div><div id="sales-list"></div>${pager("sales")}</section>`;
   let offset = 0,
-    list = [];
+    list = [],
+    sequence = 0;
   async function refresh() {
-    const params = new URLSearchParams({
-      offset,
-      search: $("#sales-search").value,
-    });
-    if ($("#date-from").value) params.set("date_from", $("#date-from").value);
-    if ($("#date-to").value) params.set("date_to", $("#date-to").value);
-    list = await api("/bills?" + params);
-    if (page !== "sales") return;
+    const seq = ++sequence,
+      params = periodParams("sales");
+    params.set("search", $("#sales-search").value);
+    params.set("offset", offset);
+    if (state.customer_id) params.set("customer_id", state.customer_id);
+    reportStates.sales.search = $("#sales-search").value;
+    const data = await api("/reports/sales?" + params);
+    if (page !== "sales" || seq !== sequence) return;
+    list = data.rows;
+    showBounds("sales", data);
+    pageInfo("sales", data);
+    $("#sales-csv").href = "/api/reports/sales/csv?" + params;
+    $("#sales-totals").innerHTML = metricCards([
+      ["Matching bills", data.summary.count],
+      ["Pieces sold", data.summary.pieces],
+      ["Total billed", rs(data.summary.total)],
+      ["Current outstanding", rs(data.summary.outstanding)],
+    ]);
     $("#sales-list").innerHTML = table(
       ["Invoice", "Date", "Customer", "Total", "Balance", "Actions"],
       list.map((b) => [
@@ -929,8 +1084,7 @@ async function sales() {
         `<button data-view="${b.id}">View</button> <button data-pay="${b.id}">Payment</button> <button data-edit="${b.id}">Edit</button> <button data-void="${b.id}" class="danger">Void</button>`,
       ]),
     );
-    $("#sales-prev").disabled = offset === 0;
-    $("#sales-next").disabled = list.length < 100;
+
     $("#sales-list").onclick = action(async (e) => {
       const id = Number(
         e.target.dataset.view ||
@@ -956,7 +1110,7 @@ async function sales() {
       }
     });
   }
-  on("#sales-refresh", "click", () => {
+  bindPeriod("sales", () => {
     offset = 0;
     return refresh();
   });
@@ -965,46 +1119,19 @@ async function sales() {
     return refresh();
   });
   on("#sales-prev", "click", () => {
-    offset = Math.max(0, offset - 100);
+    offset = Math.max(0, offset - 50);
     return refresh();
   });
   on("#sales-next", "click", () => {
-    offset += 100;
+    offset += 50;
     return refresh();
   });
-  on("#sales-csv", "click", () => downloadCsv(list));
+  on("#clear-sales-customer", "click", () => {
+    delete state.customer_id;
+    delete reportStates.sales.customer_id;
+    return sales();
+  });
   await refresh();
-}
-function downloadCsv(rows) {
-  const keys = [
-    "bill_no",
-    "bill_date",
-    "customer_name",
-    "subtotal",
-    "discount_amount",
-    "total",
-    "paid_amount",
-  ];
-  const cell = (v) =>
-    '"' +
-    String(
-      typeof v === "string" && /^[=+\-@\t\r]/.test(v) ? "'" + v : (v ?? ""),
-    ).replaceAll('"', '""') +
-    '"';
-  const blob = new Blob(
-    [
-      [keys, ...rows.map((r) => keys.map((k) => r[k]))]
-        .map((r) => r.map(cell).join(","))
-        .join("\r\n"),
-    ],
-    { type: "text/csv;charset=utf-8" },
-  );
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "sales-" + today() + ".csv";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function paymentForm(id, done) {
   const [{ bill }, payments] = await Promise.all([
@@ -1077,28 +1204,101 @@ async function editBill(id) {
   await navigate("billing");
 }
 async function balances() {
-  const rows = await api("/balances");
   $("#content").innerHTML =
-    '<section class="card">' +
-    table(
-      ["Customer", "Phone", "Billed", "Collected", "Balance"],
-      rows.map((r) => [
+    '<div id="balances-totals"></div><section class="card"><div class="toolbar"><label>Find customer<input id="balance-search" placeholder="Name or phone"></label><label class="check"><input type="checkbox" id="only-outstanding">Only outstanding</label><a id="balance-csv" download>Export matching balances (CSV)</a></div><p id="balance-match" class="muted"></p><div id="balance-list"></div>' +
+    pager("balance") +
+    '<p class="small muted">Totals cover all named customers. Walk-in bills are available in Sales & payments. Visits count saved invoices.</p></section>';
+  let offset = 0,
+    sequence = 0;
+  async function refresh() {
+    const seq = ++sequence,
+      params = new URLSearchParams({
+        search: $("#balance-search").value,
+        outstanding: $("#only-outstanding").checked ? "1" : "0",
+        offset,
+      });
+    const data = await api("/reports/balances?" + params);
+    if (page !== "balances" || seq !== sequence) return;
+    const t = data.overall;
+    $("#balances-totals").innerHTML = metricCards([
+      ["Total billed", rs(t.total)],
+      ["Payments received", rs(t.paid)],
+      ["Total outstanding", rs(t.outstanding)],
+    ]);
+    $("#balance-match").textContent =
+      `${data.summary.count} matching customers · Matching outstanding ${rs(data.summary.outstanding)}`;
+    $("#balance-csv").href = "/api/reports/balances/csv?" + params;
+    $("#balance-list").innerHTML = table(
+      ["Customer", "Phone", "Visits", "Billed", "Collected", "Balance", ""],
+      data.rows.map((r) => [
         esc(r.name),
         esc(r.phone || "—"),
+        r.visits,
         rs(r.total_billed),
         rs(r.total_paid),
         rs(r.balance),
+        `<button data-profile="${r.id}">Ledger / wishlist</button>`,
       ]),
-    ) +
-    '<p class="muted small">Record payments from Sales & payments. Walk-in outstanding bills are also listed there.</p></section>';
+    );
+    pageInfo("balance", data);
+  }
+  $("#balance-search").oninput = debounce(() => {
+    offset = 0;
+    return refresh();
+  });
+  on("#only-outstanding", "change", () => {
+    offset = 0;
+    return refresh();
+  });
+  on("#balance-prev", "click", () => {
+    offset = Math.max(0, offset - 50);
+    return refresh();
+  });
+  on("#balance-next", "click", () => {
+    offset += 50;
+    return refresh();
+  });
+  $("#balance-list").onclick = action((e) =>
+    e.target.dataset.profile
+      ? customerProfile(Number(e.target.dataset.profile))
+      : null,
+  );
+  await refresh();
 }
 async function expenses() {
-  const rows = await api("/expenses");
   $("#content").innerHTML =
-    '<section class="card"><div class="toolbar"><h3>Shop expenses</h3><button id="expense-add" class="primary">+ Add expense</button></div>' +
-    table(
+    '<div id="expense-totals"></div><section class="card"><div class="row between"><h3>Expense history</h3><button id="expense-add" class="primary">+ Add expense</button></div>' +
+    periodControls("expenses") +
+    '<div class="toolbar"><label>Search expenses<input id="expense-search" placeholder="Description or category"></label><label>Category<select id="expense-category"><option value="">All categories</option></select></label><a id="expense-csv" download>Export all matching expenses (CSV)</a></div><div id="expense-list"></div>' +
+    pager("expense") +
+    "</section>";
+  let offset = 0,
+    sequence = 0;
+  async function refresh() {
+    const seq = ++sequence,
+      params = periodParams("expenses");
+    params.set("offset", offset);
+    params.set("search", $("#expense-search").value);
+    params.set("category", $("#expense-category").value);
+    const data = await api("/reports/expenses?" + params);
+    if (page !== "expenses" || seq !== sequence) return;
+    showBounds("expenses", data);
+    pageInfo("expense", data);
+    $("#expense-totals").innerHTML = metricCards([
+      ["Matching expenses", data.summary.count],
+      ["Total expenses", rs(data.summary.total)],
+    ]);
+    const category = params.get("category");
+    $("#expense-category").innerHTML =
+      '<option value="">All categories</option>' +
+      data.categories
+        .map((c) => `<option value="${esc(c)}">${esc(c)}</option>`)
+        .join("");
+    $("#expense-category").value = category;
+    $("#expense-csv").href = "/api/reports/expenses/csv?" + params;
+    $("#expense-list").innerHTML = table(
       ["Date", "Category", "Amount", "Method", "Description", ""],
-      rows.map((r) => [
+      data.rows.map((r) => [
         esc(r.expense_date),
         esc(r.category),
         rs(r.amount),
@@ -1106,8 +1306,28 @@ async function expenses() {
         esc(r.description),
         `<button data-expense-delete="${r.id}" class="danger">Delete</button>`,
       ]),
-    ) +
-    "</section>";
+    );
+  }
+  bindPeriod("expenses", () => {
+    offset = 0;
+    return refresh();
+  });
+  $("#expense-search").oninput = debounce(() => {
+    offset = 0;
+    return refresh();
+  });
+  on("#expense-category", "change", () => {
+    offset = 0;
+    return refresh();
+  });
+  on("#expense-prev", "click", () => {
+    offset = Math.max(0, offset - 50);
+    return refresh();
+  });
+  on("#expense-next", "click", () => {
+    offset += 50;
+    return refresh();
+  });
   on("#expense-add", "click", () => {
     modal(
       "Record expense",
@@ -1129,10 +1349,10 @@ async function expenses() {
       e.preventDefault();
       await api("/expenses", { method: "POST", body: values(e.target), key });
       $("#dialog").close();
-      await expenses();
+      await refresh();
     });
   });
-  $("#content").onclick = action(async (e) => {
+  $("#expense-list").onclick = action(async (e) => {
     const id = e.target.dataset.expenseDelete;
     if (
       id &&
@@ -1141,44 +1361,62 @@ async function expenses() {
       )
     ) {
       await api("/expenses/" + id, { method: "DELETE" });
-      await expenses();
+      await refresh();
     }
   });
+  await refresh();
 }
 async function stats() {
-  const data = await api("/stats");
-  const t = data.totals,
-    max = Math.max(...data.monthly.map((r) => r.revenue), 1);
   $("#content").innerHTML =
-    '<div class="metrics">' +
-    [
-      ["Sales", rs(t.revenue)],
-      ["Collected", rs(t.payments_collected)],
-      ["Outstanding", rs(t.outstanding)],
-      ["Expenses", rs(t.expenses)],
-    ]
-      .map(
-        ([label, v]) =>
-          `<div class="card"><p class="eyebrow">${label}</p><div class="metric">${v}</div></div>`,
-      )
-      .join("") +
-    '</div><div class="stack"><section class="card"><h3>Monthly sales</h3>' +
-    data.monthly
-      .map(
-        (r) =>
-          `<div class="bar-row"><span>${esc(r.month)}</span><div class="bar"><span style="width:${Math.max(0, (r.revenue / max) * 100)}%"></span></div><b>${rs(r.revenue)}</b></div>`,
-      )
-      .join("") +
-    '</section><section class="card"><h3>Best selling items</h3>' +
-    table(
-      ["Item", "Quantity", "Revenue"],
-      data.top_items.map((r) => [
-        esc(r.name),
-        r.total_qty,
-        rs(r.total_revenue),
-      ]),
-    ) +
-    "</section></div>";
+    '<section class="card">' +
+    periodControls("overview", "month") +
+    '<p class="small muted">Outstanding is the current balance of bills in the selected period. Collections use payment dates. Rankings use recorded taxable sales, excluding GST; historical tax details may be incomplete.</p></section><div id="overview-results"></div>';
+  let sequence = 0;
+  async function refresh() {
+    const seq = ++sequence,
+      data = await api("/reports/overview?" + periodParams("overview"));
+    if (page !== "stats" || seq !== sequence) return;
+    showBounds("overview", data);
+    const t = data.totals;
+    $("#overview-results").innerHTML =
+      metricCards([
+        ["Bills", t.bill_count],
+        ["Pieces sold", t.pieces],
+        ["Sales incl GST", rs(t.revenue)],
+        ["Collected in period", rs(t.payments_collected)],
+        ["Current outstanding", rs(t.outstanding)],
+        ["Expenses", rs(t.expenses)],
+      ]) +
+      `<div class="stack"><section class="card"><h3>${data.granularity === "day" ? "Daily" : "Monthly"} sales · ${esc(data.date_from)} to ${esc(data.date_to)}</h3>${verticalChart(data.series, data.granularity)}</section><section class="card"><h3>Categories sold · quantity</h3>${horizontalChart(data.categories, "quantity")}${table(
+        ["Category", "Quantity", "Net sales (ex GST)"],
+        data.categories.map((r) => [esc(r.name), r.quantity, rs(r.revenue)]),
+      )}</section><div class="grid2"><section class="card"><h3>Best items by quantity</h3>${horizontalChart(data.top_quantity, "quantity")}</section><section class="card"><h3>Best items by net sales</h3>${horizontalChart(data.top_revenue, "revenue")}</section></div><section class="card"><h3>Best customers · total billed</h3>${table(
+        ["Customer", "Visits", "Sales incl GST", ""],
+        data.customers.map((c) => [
+          esc(c.name),
+          c.visits,
+          rs(c.revenue),
+          `<button data-profile="${c.id}">Profile / wishlist</button>`,
+        ]),
+      )}</section><section class="card"><h3>Common open wishlist demand · all customers</h3><p class="small muted">Current open requests, independent of the sales period. Exact descriptions grouped ignoring case and surrounding spaces; different wording stays separate.</p>${table(
+        ["Request", "Customers", "Requests"],
+        data.demand.map((r) => [esc(r.request), r.customers, r.requests]),
+      )}</section></div>`;
+    $("#overview-results").onclick = action(async (e) => {
+      const bar = e.target.closest("[data-period-label]");
+      if (bar) {
+        const label = bar.dataset.periodLabel;
+        reportStates.sales =
+          label.length === 10
+            ? { period: "custom", date_from: label, date_to: label }
+            : { period: "month", month: label };
+        await navigate("sales");
+      } else if (e.target.dataset.profile)
+        await customerProfile(Number(e.target.dataset.profile));
+    });
+  }
+  bindPeriod("overview", refresh);
+  await refresh();
 }
 async function messages() {
   const rows = await api("/messages");
