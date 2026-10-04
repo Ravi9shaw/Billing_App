@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Shop Billing</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div id="loading" class="loading hidden" role="status" aria-live="polite">
+      <span class="spinner"></span> Loading…
+    </div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+    <section id="login" class="login">
+      <div class="login-card">
+        <div class="mark">B</div>
+        <p class="eyebrow">YOUR SHOP, IN SYNC</p>
+        <h1 id="login-company">Shop Billing</h1>
+        <p class="muted">Choose how you want to work today.</p>
+        <form id="login-form">
+          <label
+            >Workspace<select id="role">
+              <option value="employee">Employee · billing</option>
+              <option value="admin">Admin · manage shop</option>
+            </select></label
+          ><label id="password-label" class="hidden"
+            >Admin password<input
+              id="password"
+              type="password"
+              autocomplete="current-password" /></label
+          ><button class="primary wide" type="submit">Continue</button>
+          <p id="login-error" class="error" role="alert"></p>
+        </form>
+        <p class="muted small">
+          One shared record for your counter and connected devices.
+        </p>
+      </div>
+    </section>
+    <div id="shell" class="hidden">
+      <aside>
+        <div class="brand">
+          <div class="mark">B</div>
+          <span id="company-name">Shop Billing</span>
+        </div>
+        <p class="eyebrow">WORKSPACE</p>
+        <nav id="nav">
+          <button data-page="billing" class="active">+ New bill</button
+          ><button data-page="inventory" class="admin">Inventory</button
+          ><button data-page="customers" class="admin">Customers</button
+          ><button data-page="sales" class="admin">Sales &amp; payments</button
+          ><button data-page="balances" class="admin">Balances</button
+          ><button data-page="expenses" class="admin">Expenses</button
+          ><button data-page="stats" class="admin">Overview</button
+          ><button data-page="messages" class="admin">WhatsApp updates</button
+          ><button data-page="status" class="admin">
+            Backup &amp; activity
+          </button>
+        </nav>
+        <div class="aside-bottom">
+          <span id="connection">● Connected</span
+          ><button id="logout" class="quiet">Sign out</button>
+        </div>
+      </aside>
+      <main>
+        <header class="page-header">
+          <div>
+            <p id="role-badge" class="eyebrow">EMPLOYEE WORKSPACE</p>
+            <h1 id="page-title">New bill</h1>
+          </div>
+          <div class="header-actions">
+            <span id="today"></span
+            ><button id="switch-role">Switch to admin</button>
+          </div>
+        </header>
+        <div id="content"></div>
+      </main>
+    </div>
+    <dialog id="dialog">
+      <div class="dialog-head">
+        <h2 id="dialog-title"></h2>
+        <button id="dialog-close" aria-label="Close">×</button>
+      </div>
+      <div id="dialog-body"></div>
+    </dialog>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

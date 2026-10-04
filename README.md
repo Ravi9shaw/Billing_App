@@ -1,0 +1,96 @@
+# Shop Billing
+
+One shared billing application for the Windows desktop, shop server, and phone browsers. The desktop is a native window using the same authenticated API and UI as browsers. Old `app/` and nested `Billing_App/` launch paths forward to this implementation.
+
+## Windows: one command
+
+Install **Python 3.11 (64-bit)** and **Git for Windows** first. In **Git Bash**:
+
+```bash
+git clone https://github.com/Ravi9shaw/Billing_App.git && cd Billing_App && bash setupapp.sh
+```
+
+For an existing checkout: `bash setupapp.sh`, or double-click `setupapp.bat` in File Explorer. The setup asks for company name, admin password and optional Meta WhatsApp credentials, then optional company/invoice details. Blank optional fields stay optional. It installs into `.venv`, checks errors, and can be rerun after an interrupted dependency install. It **never deletes or resets the shop database**.
+
+- `startapp.bat`: desktop window. It starts the local server if necessary.
+- `startserver.bat`: standalone server for the shop host.
+- `build_windows.bat`: builds `dist\ClothShopBilling.exe`. Use Windows to build a Windows EXE.
+- A copied EXE has a first-run company/password setup dialog. The backend is bundled explicitly, including its dependencies, web UI and Qt WebEngine support. Keep enough free temporary disk space for the onefile extraction.
+
+Closing a desktop window **leaves the server running** so phone tills are not disconnected. For maintenance, stop the standalone server with Ctrl+C; for a detached Windows server, close its matching `ClothShopBilling.exe --run-server` / Python server process in Task Manager. Stop server processes before restoring data or upgrading. Start `startserver.bat` through Windows Task Scheduler at login if the host should start automatically; the host must remain awake.
+
+## Multiple users / computers
+
+Keep one host computer and one local database file. Other desktops set `BILLING_SERVER_URL=http://<shop-host-ip>:5000` in their user-local `.env`; browsers open that same URL. Remote desktop clients do not open SQLite. Do not put the database on SMB/OneDrive/network shares or run old application versions against it.
+
+Allow the selected port on the host's **private** Windows firewall profile. Keep the service on the shop's trusted network. For access beyond that network, deploy HTTPS with a reverse proxy and set `BILLING_COOKIE_SECURE=true`; this release does not install certificates or expose the host to the internet.
+
+SQLite uses WAL, full synchronous durability, bounded write waits and short transactions. Concurrent checkout and payments are serialized at the database write boundary; reads use consistent snapshots. This serves a single shop host with connected tills, rather than multiple independent database hosts. Larger multi-host deployments need a database migration and measured capacity planning.
+
+## Employee and admin
+
+Every new session starts with the employee/admin choice. Employees can select catalog items/quantities, add optional customer information, complete bills, print and share them. They cannot change catalog prices, discounts, taxes, inventory, records or admin reports through the API.
+
+Admin login uses the configured password (stored as a salted scrypt hash). On New Bill, **Switch to admin** requests that password; **Switch to employee** removes admin access. Admin manages catalog, customers, tax modes, discounts, sales edits/voids, payments, expenses, messages and backups. Sessions expire after eight hours and the browser preserves a draft on connection/session errors. Sign out on shared devices. Role selection is not individual employee identity tracking.
+
+## Accurate billing
+
+- GST added, GST included, or without GST; interstate IGST is an admin choice. Configure the default mode/rate for your own catalog.
+- Totals use Decimal and per-line cent rounding on the server. Client-supplied totals are not authoritative.
+- Price/catalog versions and stock edit preconditions prevent stale edits overwriting intervening changes.
+- Checkout and payment retries reuse request keys. Invoice sequence numbers remain allocated when a bill is voided.
+- Stock deductions are recorded explicitly, so a sale at zero recorded stock can be reversed without inventing stock.
+- Saved invoices contain customer/company/tax snapshots. Receipts use actual payment totals and outstanding balances.
+- Void and edit history is retained in the activity log, including original payment and line records.
+
+The reference invoice layout is implemented in `billing/invoice.py`: company heading, customer and transport details, item/HSN/quantity/rate/amount table, totals/tax, amount in words, bank details and signatures. Browser printing and PDF generation support multiple pages. Logo artwork from the sample was not copied; sample billing/bank values are not embedded.
+
+## Existing production data and recovery
+
+Default live database: `%USERPROFILE%\.cloth_shop_billing\cloth_shop.db` (Linux: `~/.cloth_shop_billing/cloth_shop.db`). Configuration is `.env` beside it. Logs, backups and campaign uploads are in that same writable data directory. `.env.example` documents environment overrides; environment values win over the file. Secrets are never returned by the API or included in an EXE.
+
+Before a legacy schema migration, the app creates and integrity-checks a SQLite backup. Migrations preserve optional values and historical amounts. The old repeated “mark everything paid” migration is removed. Only a database that never had a payments table receives the one-time pre-payment-era conversion.
+
+Some old data cannot be inferred reliably. **Backup & activity → Review records** lists the previous buggy migration payments and bill lines whose actual stock deduction is unknown. An admin must use actual records to correct these, with a required explanation and retained audit history. Unknown historical stock prevents automated voiding/editing until reconciled. No records are silently assumed to be unpaid or assigned a guessed stock correction.
+
+Automatic online backups run after changes, at most once per configured interval (60 seconds by default), plus graceful shutdown. The latest 30 automatic backups are retained by default; manual, pre-migration and pre-restore copies are retained separately. Backup failure appears in the admin status screen. Live committed transactions remain in the SQLite database/WAL between backups. Copy backups **and your `.env` / uploads** to a separate device for hardware-failure recovery; a same-disk copy alone cannot survive a failed drive.
+
+```bash
+# Use .venv\Scripts\python.exe on Windows; .venv/bin/python on Linux.
+python -m billing.maintenance backup
+python -m billing.maintenance check
+# STOP the host server first. Restore refuses while its process lock is held.
+python -m billing.maintenance restore "path/to/verified-backup.db" --confirm
+```
+
+Restore verifies integrity, makes a safety copy of the current database, restores through SQLite's backup API, and applies supported versioned migrations. The application process lock coordinates supported server/restore commands; external SQLite tools or old versions must not write concurrently. Test upgrades against a copy of your real database before replacing the shop installation.
+
+## WhatsApp
+
+No messages are sent during setup. Without API credentials, each receipt offers Download PDF and manual Share PDF (native share where available, otherwise download and attach in WhatsApp).
+
+The included automated provider is **Meta WhatsApp Cloud API**; it is disabled by default. A token alone is not sufficient. Configure `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, the currently supported `WHATSAPP_API_VERSION`, language and an approved invoice template. The invoice template must have a **document header** and **one body text parameter** (invoice number). Campaign templates must have an **image header** and **one body text parameter** (your update text). Create/approve these in your Meta account before sending. See [Meta's message API reference](https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages).
+
+Customers must have a valid international phone number and recorded WhatsApp permission. Admin can withdraw permission on the customer profile. Admin uploads a PNG/JPG, selects an approved template, reviews recipient count, and queues an offer/new-stock update to opted-in customers. The persistent outbox resumes queued work after a restart and rechecks consent before sending.
+
+“Accepted” is provider acceptance, **not delivery confirmation**. Rejected/uncertain sends remain visible. Ambiguous requests are not automatically retried because the provider may already have received them. Delivery webhooks and other provider adapters are not implemented. There is no silent fallback to another provider or automatic send to customers without permission.
+
+## Development and verification
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+.venv/bin/python -m billing --setup
+.venv/bin/python -m billing --run-server
+```
+
+Tests use temporary synthetic databases: legacy migrations, restart durability, optional fields, concurrent checkout/payments, idempotency, stock reversal, permissions, stale edits, backups and invoice generation. Validate native Windows onefile launch, printing, firewall and display scaling on the target shop machine before rollout. The Linux build smoke is not a substitute for Windows acceptance.
+
+### Receiving UPI payments
+
+Setup (including the EXE first-run dialog) asks for an optional **receiving UPI ID**, for example `yourshop@bank`. This is saved as `UPI_ID` in the user-local `.env`. Use the actual UPI address linked to the receiving account; `COMPANY_PHONE` is only a contact number and `BANK_ACCOUNT` is printed bank information.
+
+New invoices save this destination with the company snapshot. When a saved invoice has an outstanding balance, its printable HTML and PDF include a UPI QR for that balance. Fully paid invoices and invoices without a valid configured UPI ID have no payment QR. To collect after bill creation, enter the amount already received in **Paid now** (zero if unpaid), complete the bill, and open/print its QR. After confirming receipt in your bank/payment app, an admin records the payment under **Sales & payments**. Scanning does not automatically mark a bill paid. Existing printed copies cannot update after subsequent payments, so use a fresh receipt for the current balance.
+
+The payment URI uses the UPI address, payee name, INR amount and invoice note described in [Google Pay's UPI intent reference](https://developers.google.com/pay/india/api/android/in-app-payments). Account validity and acceptance must be checked in the recipient's payment app before shop use. No live payment is made by setup or by the automated tests.
